@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "knitweb-monitor"
+version = "0.1.0"
+description = "Zero-dependency, cross-platform dashboard for Knitweb nodes, the knowledge graph, and MOLGANG sessions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "Knitweb" }]
+keywords = ["knitweb", "monitor", "dashboard", "p2p", "knowledge-graph", "molgang"]
+dependencies = []                       # pure stdlib
+
+[project.optional-dependencies]
+graph = ["networkx>=3.0"]               # optional: nicer layout (pure-Python fallback otherwise)
+knitweb = ["knitweb"]                   # optional: read node ledger state
+
+[project.scripts]
+knitweb-monitor = "knitweb_monitor:main"
+
+[project.urls]
+Homepage = "https://github.com/knitweb/monitor"
+Repository = "https://github.com/knitweb/monitor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knitweb_monitor"]
