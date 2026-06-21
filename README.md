@@ -34,12 +34,22 @@ Then open <http://127.0.0.1:8990>.
   the MOLGANG knowledge layer (`subject —relation→ object`, ⚓ = OriginTrail-anchored).
 - **MOLGANG** — every configured session's tables, seated players, and woven fabric, with a
   link to open each.
+- **👥 Actors** — a live roll-call of **every GitHub account active across the org's repositories**
+  (`github.com/knitweb` by default), refreshed automatically **every 10 minutes**. For each actor:
+  human-vs-bot, commit count, pull requests (and how many merged), issue/PR comments, and which
+  repos they touch. Commit-authors **and** PR-authors **and** comment-authors are aggregated, so
+  squash-merged external contributors and discussion-only participants both show up — not just
+  whoever holds the merge commit. Works unauthenticated (public repos, 60 req/hr); set
+  `GITHUB_TOKEN` for private repos and a 5000 req/hr limit. The refresh runs on a background
+  thread, so the dashboard request never blocks on the GitHub API, and it degrades gracefully
+  offline (keeps the last good roster and flags it stale).
 
 ## Options
 
 ```
 --molgang URL            a MOLGANG session base URL (repeatable), e.g. http://localhost:8765
 --node LABEL=WALLET[:PORT]  a knitweb node wallet to watch (repeatable); PORT enables liveness
+--github-org ORG         GitHub org/user for the Actors tab (default: knitweb; "" disables it)
 --port N                 dashboard port (default 8990)
 --host HOST              bind address (default 127.0.0.1)
 --knitweb-src PATH       path to a knitweb 'src' checkout if knitweb isn't pip-installed
@@ -58,7 +68,8 @@ knitweb-monitor \
 ```
 
 Everything is configurable by env too: `KNITWEB_MONITOR_PORT`, `KNITWEB_MONITOR_MOLGANG`
-(comma-separated URLs), `KNITWEB_SRC`.
+(comma-separated URLs), `KNITWEB_SRC`, `KNITWEB_MONITOR_ORG` (Actors tab), and `GITHUB_TOKEN`
+(or `GH_TOKEN`) for authenticated GitHub access.
 
 ## Optional extras (auto-detected, never required)
 
@@ -69,8 +80,10 @@ Everything is configurable by env too: `KNITWEB_MONITOR_PORT`, `KNITWEB_MONITOR_
 
 ## Safety
 
-Read-only. It polls HTTP endpoints and reads wallet snapshots — it never writes state, moves
-funds, or speaks a node's wire protocol. Binds to `127.0.0.1` by default.
+Read-only. It polls HTTP endpoints, reads wallet snapshots, and reads the public GitHub API for
+the Actors tab — it never writes state, moves funds, or speaks a node's wire protocol. Binds to
+`127.0.0.1` by default. The Actors tab is the only feature that reaches the public internet
+(`api.github.com`); disable it with `--github-org ""` for a fully air-gapped, localhost-only run.
 
 ## License
 Apache-2.0.
