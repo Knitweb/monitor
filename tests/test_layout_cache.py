@@ -40,3 +40,15 @@ def test_changed_topology_is_a_distinct_cache_entry():
 
 def test_empty_graph_is_handled():
     assert _layout([], []) == {}
+
+
+def test_cache_is_bounded_and_does_not_grow_unbounded():
+    from knitweb_monitor import _layout, _layout_cache, _LAYOUT_CACHE_MAX
+    _layout_cache.clear()
+    # Feed many DISTINCT topologies (more than the cap) — the cache must stay bounded.
+    for i in range(_LAYOUT_CACHE_MAX * 2 + 5):
+        _layout([f"n{i}a", f"n{i}b"], [(f"n{i}a", f"n{i}b")])
+        assert len(_layout_cache) <= _LAYOUT_CACHE_MAX, "layout cache must never exceed its bound"
+    # And it still serves correctly after eviction churn.
+    nodes, edges = ["x", "y"], [("x", "y")]
+    assert _layout(nodes, edges) == _layout(nodes, edges)
