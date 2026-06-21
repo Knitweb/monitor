@@ -10,3 +10,7 @@ A self-contained, dependency-free **3D knowledge-graph explorer** for the knitwe
 Interactions: hover a node for its keywords / definition (+ multilingual labels for live concepts), hover a link for the relation, **click a node to centre the camera**, drag nodes to reshape the force layout, scroll to zoom, drag the background to rotate. Keyword chips toggle on/off.
 
 Intended as the MONITOR-as-product explorer surface (Knitweb/monitor#1). It can later be wired to the gateway `GET /web` read contract (pinned in pulse #214) for a fully live, trustless graph.
+
+
+## `knitweb-monitor.html` — live monitor build
+Same explorer, but **defaults to the Live chem-web** and **auto-refreshes every 30 s** (`AUTOLIVE`). Deploy as the index of `5mart.ml/monitor/` (or `~/www/monitor/index.html`) to get a live, self-updating 3D view of the molgang chemistry web as players knit into it over pulse p2p. Always-on labels, language selector (EN/RU/中文/粵/AR — terms + relations), click-to-centre.
