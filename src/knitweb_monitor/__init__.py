@@ -21,6 +21,8 @@ import json
 import os
 import socket
 import sys
+import threading
+import time
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,12 +62,46 @@ def port_live(port: int | None, host: str = "127.0.0.1") -> bool:
         return False
 
 
+# Short-TTL cache so a single poll tick (build_graph calls _game_links while read_molgang already
+# fetched /api/web) and concurrent browser polls (2s/3s/20s intervals) share ONE blocking fetch per
+# URL instead of fanning out duplicates. TTL < the 2s poll interval keeps the dashboard fresh. The
+# URL set is fixed by config (nodes + molgang), so the cache stays tiny — no eviction needed.
+_HTTP_CACHE: dict = {}
+_HTTP_CACHE_LOCK = threading.Lock()
+_HTTP_CACHE_URL_LOCKS: dict[str, threading.Lock] = {}
+_HTTP_CACHE_TTL = 1.5  # seconds
+
+
+def _http_cache_lock(url: str) -> threading.Lock:
+    with _HTTP_CACHE_LOCK:
+        lock = _HTTP_CACHE_URL_LOCKS.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _HTTP_CACHE_URL_LOCKS[url] = lock
+        return lock
+
+
 def http_json(url: str, timeout: float = 2.5):
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
+    now = time.monotonic()
+    with _HTTP_CACHE_LOCK:
+        hit = _HTTP_CACHE.get(url)
+        if hit is not None and now - hit[0] < _HTTP_CACHE_TTL:
+            return hit[1]
+
+    with _http_cache_lock(url):
+        now = time.monotonic()
+        with _HTTP_CACHE_LOCK:
+            hit = _HTTP_CACHE.get(url)
+            if hit is not None and now - hit[0] < _HTTP_CACHE_TTL:
+                return hit[1]
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            data = None
+        with _HTTP_CACHE_LOCK:
+            _HTTP_CACHE[url] = (time.monotonic(), data)
+        return data
 
 
 def _load_knitweb():
