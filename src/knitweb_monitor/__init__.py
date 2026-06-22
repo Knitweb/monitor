@@ -170,7 +170,30 @@ def _game_links() -> list:
     return links
 
 
+# Memoized layouts keyed by exact (nodes, edges) input. The layout is the
+# expensive part of build_graph (O(n^2) per iteration x 120 in the pure-Python
+# fallback) and build_graph runs on every /api/graph poll (~20s, per browser).
+# The layout is fully deterministic (seed=7), so identical topology always yields
+# identical positions — caching is safe and turns repeat polls of an unchanged
+# graph into O(1). A changed graph is a different key and recomputes.
+_layout_cache: dict = {}
+_LAYOUT_CACHE_MAX = 32
+
+
 def _layout(nodes: list[str], edges: list[tuple[str, str]]) -> dict:
+    """Cached wrapper over :func:`_layout_compute` (see cache note above)."""
+    key = (tuple(nodes), tuple(edges))
+    cached = _layout_cache.get(key)
+    if cached is not None:
+        return cached
+    result = _layout_compute(nodes, edges)
+    if len(_layout_cache) >= _LAYOUT_CACHE_MAX:
+        _layout_cache.clear()  # simple bound — topology rarely churns
+    _layout_cache[key] = result
+    return result
+
+
+def _layout_compute(nodes: list[str], edges: list[tuple[str, str]]) -> dict:
     """Return {node: (x, y)} in [-1, 1]. Uses networkx if present, else a pure-Python
     deterministic Fruchterman-Reingold so the monitor needs zero dependencies."""
     if not nodes:
