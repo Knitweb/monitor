@@ -1,0 +1,36 @@
+{
+  "name": "sample chem-web",
+  "nodes": [
+    {
+      "id": "water",
+      "lab": "Water",
+      "ml": {"en": "Water", "ru": "Вода", "zh": "水", "ar": "ماء"},
+      "def": "A molecule made from two hydrogen atoms and one oxygen atom.",
+      "keywords": "chemistry|molecule|H2O|solvent",
+      "by": "sample",
+      "confirmations": 3
+    },
+    {
+      "id": "h2o",
+      "lab": "H2O",
+      "ml": {"en": "H2O", "ru": "H2O", "zh": "H2O", "ar": "H2O"},
+      "def": "The chemical formula for water.",
+      "keywords": "formula|water|hydrogen|oxygen",
+      "by": "sample",
+      "confirmations": 3
+    },
+    {
+      "id": "solvent",
+      "lab": "Solvent",
+      "ml": {"en": "Solvent", "ru": "Растворитель", "zh": "溶剂", "ar": "مذيب"},
+      "def": "A substance that dissolves another substance.",
+      "keywords": "solution|chemistry|mixture|liquid",
+      "by": "sample",
+      "confirmations": 2
+    }
+  ],
+  "edges": [
+    {"s": "water", "t": "h2o", "r": "has-formula"},
+    {"s": "water", "t": "solvent", "r": "can-act-as"}
+  ]
+}
