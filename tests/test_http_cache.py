@@ -2,6 +2,8 @@
 fetch per URL instead of fanning out duplicates (read_molgang + _game_links both hit /api/web)."""
 
 import io
+import threading
+import time
 import knitweb_monitor as km
 
 
@@ -55,3 +57,37 @@ def test_cache_expires_after_ttl(monkeypatch):
     t[0] += km._HTTP_CACHE_TTL + 0.1       # advance past TTL
     km.http_json("http://x/api/web")       # refetched
     assert calls["n"] == 2
+
+
+def test_concurrent_same_url_fetches_once(monkeypatch):
+    km._HTTP_CACHE.clear()
+    t = [1000.0]
+    _clock(monkeypatch, t)
+    calls = {"n": 0}
+    entered = threading.Barrier(2)
+    release = threading.Event()
+
+    def fake_urlopen(url, timeout=2.5):
+        calls["n"] += 1
+        entered.wait(timeout=2)
+        release.wait(timeout=2)
+        return _FakeResp(b'{"ok": true}')
+
+    monkeypatch.setattr(km.urllib.request, "urlopen", fake_urlopen)
+    results = []
+
+    def worker():
+        results.append(km.http_json("http://x/api/web"))
+
+    first = threading.Thread(target=worker)
+    first.start()
+    entered.wait(timeout=2)
+    second = threading.Thread(target=worker)
+    second.start()
+    time.sleep(0.05)
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert results == [{"ok": True}, {"ok": True}]
+    assert calls["n"] == 1
