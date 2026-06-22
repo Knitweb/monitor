@@ -1,5 +1,5 @@
 """knitweb-monitor — a zero-dependency, cross-platform dashboard for Knitweb nodes,
-the woven knowledge graph, and live MOLGANG game sessions.
+the woven knowledge graph, live MOLGANG game sessions, and the org's GitHub actors.
 
 Pure Python (stdlib only). Runs identically on Windows, macOS and Linux:
 
@@ -23,11 +23,12 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Optional deps — detected once, never required.
 try:
@@ -46,6 +47,9 @@ class Config:
         self.symbol = "PLS"
         self.knitweb_src: str | None = None
         self.active_window = 30              # seconds a port-beat counts as "live"
+        self.github_org = "knitweb"          # org whose repo actors the Actors tab shows ("" disables)
+        self.github_token: str | None = None  # optional; raises GitHub rate limit 60→5000/hr
+        self.actors_refresh = 600            # seconds between GitHub actor refreshes (10 min)
 
 
 CFG = Config()
@@ -155,6 +159,164 @@ def read_molgang() -> dict:
         web = http_json(base + "/api/web")
         sessions.append({"url": base, "live": st is not None, "state": st, "web": web})
     return {"active": any(s["live"] for s in sessions), "sessions": sessions, "urls": CFG.molgang}
+
+
+# --------------------------------------------------------------------------- actors
+# A live, auto-refreshed roll-call of every GitHub account active across the
+# org's repositories: humans and bots, with their commit/PR footprint and which
+# repos they touch. Refreshed by a background thread every CFG.actors_refresh
+# seconds (default 10 min) so the dashboard request itself never blocks on the
+# GitHub API. Works unauthenticated (public repos, 60 req/hr); set GITHUB_TOKEN
+# for private repos and the 5000 req/hr limit.
+_KNOWN_BOTS = {"dependabot", "dependabot[bot]", "github-actions", "github-actions[bot]",
+               "copilot", "github-code-quality[bot]", "codecov-commenter"}
+
+_ACTORS = {"lock": threading.Lock(), "at": 0.0, "data": None, "error": None, "fetching": False}
+
+
+def _classify(login: str) -> str:
+    lo = login.lower()
+    if lo.endswith("[bot]") or lo in _KNOWN_BOTS:
+        return "bot"
+    return "human"
+
+
+def _gh_api(path: str, timeout: float = 6.0):
+    """GET https://api.github.com/<path> as JSON. Honors GITHUB_TOKEN. Never raises;
+    returns (data, error_string)."""
+    req = urllib.request.Request(
+        "https://api.github.com" + path,
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "knitweb-monitor",
+                 "X-GitHub-Api-Version": "2022-11-28"})
+    if CFG.github_token:
+        req.add_header("Authorization", "Bearer " + CFG.github_token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace")), None
+    except urllib.error.HTTPError as e:
+        detail = "rate-limited" if e.code == 403 else f"HTTP {e.code}"
+        return None, detail
+    except Exception as e:
+        return None, type(e).__name__
+
+
+def _collect_actors() -> dict:
+    """One full sweep of the org's repos → aggregated per-actor footprint.
+    Counts commit-contributors AND pull-request authors, so squash-merged
+    external contributors (whose merge commit lands under the maintainer) are
+    still surfaced as the real PR author."""
+    org = CFG.github_org
+    repos_json, err = _gh_api(f"/orgs/{org}/repos?per_page=100&type=public&sort=full_name")
+    if repos_json is None:                       # maybe it's a user, not an org
+        repos_json, err2 = _gh_api(f"/users/{org}/repos?per_page=100&sort=full_name")
+        if repos_json is None:
+            return {"ok": False, "org": org, "error": err or err2 or "fetch failed",
+                    "actors": [], "repos": [], "n_actors": 0, "n_repos": 0, "rate_note": None}
+    repos = [r["name"] for r in repos_json if not r.get("archived")]
+
+    actors: dict[str, dict] = {}
+    rate_note = None
+
+    def touch(login: str) -> dict:
+        return actors.setdefault(login, {"login": login, "kind": _classify(login), "repos": set(),
+                                         "commits": 0, "prs": 0, "merged_prs": 0, "comments": 0})
+
+    for name in repos:
+        # 1) commit authors
+        cont, e1 = _gh_api(f"/repos/{org}/{name}/contributors?per_page=100&anon=0")
+        if isinstance(cont, list):
+            for c in cont:
+                login = c.get("login")
+                if not login:
+                    continue
+                a = touch(login)
+                a["repos"].add(name)
+                a["commits"] += int(c.get("contributions") or 0)
+        elif e1:
+            rate_note = e1
+        # 2) pull-request authors (surfaces squash-merged external contributors)
+        pulls, e2 = _gh_api(f"/repos/{org}/{name}/pulls?state=all&per_page=100")
+        if isinstance(pulls, list):
+            for p in pulls:
+                login = (p.get("user") or {}).get("login")
+                if not login:
+                    continue
+                a = touch(login)
+                a["repos"].add(name)
+                a["prs"] += 1
+                if p.get("merged_at"):
+                    a["merged_prs"] += 1
+        elif e2:
+            rate_note = e2
+        # 3) issue/PR comment authors (surfaces actors who only discuss — reviewers,
+        #    helpers, bots — so "all actors" is genuinely complete, not just committers)
+        comments, e3 = _gh_api(f"/repos/{org}/{name}/issues/comments?per_page=100&sort=created&direction=desc")
+        if isinstance(comments, list):
+            for c in comments:
+                login = (c.get("user") or {}).get("login")
+                if not login:
+                    continue
+                a = touch(login)
+                a["repos"].add(name)
+                a["comments"] += 1
+        elif e3:
+            rate_note = e3
+
+    out = [{"login": a["login"], "kind": a["kind"], "repos": sorted(a["repos"]),
+            "n_repos": len(a["repos"]), "commits": a["commits"], "prs": a["prs"],
+            "merged_prs": a["merged_prs"], "comments": a["comments"]} for a in actors.values()]
+    out.sort(key=lambda x: (-x["commits"], -x["prs"], -x["comments"], -x["n_repos"], x["login"].lower()))
+    return {"ok": True, "org": org, "n_repos": len(repos), "repos": repos,
+            "actors": out, "n_actors": len(out),
+            "humans": sum(1 for a in out if a["kind"] == "human"),
+            "bots": sum(1 for a in out if a["kind"] == "bot"),
+            "rate_note": rate_note}
+
+
+def _actors_refresh_once() -> None:
+    with _ACTORS["lock"]:
+        if _ACTORS["fetching"]:
+            return
+        _ACTORS["fetching"] = True
+    data = {"ok": False, "error": "fetch failed"}
+    try:
+        data = _collect_actors()
+    except Exception as e:
+        data = {"ok": False, "error": type(e).__name__}
+    finally:
+        with _ACTORS["lock"]:
+            _ACTORS["fetching"] = False
+            if data.get("ok"):
+                _ACTORS["data"] = data
+                _ACTORS["at"] = time.monotonic()
+                _ACTORS["error"] = None
+            else:                                # keep last-good data; annotate the error
+                _ACTORS["error"] = data.get("error")
+
+
+def _actors_loop() -> None:
+    while True:
+        _actors_refresh_once()
+        time.sleep(CFG.actors_refresh)
+
+
+def read_actors() -> dict:
+    """Latest cached snapshot — instant, never hits the network on the request path."""
+    with _ACTORS["lock"]:
+        data, at, err, fetching = _ACTORS["data"], _ACTORS["at"], _ACTORS["error"], _ACTORS["fetching"]
+    if not CFG.github_org:
+        return {"ok": False, "disabled": True, "org": "", "actors": [], "repos": [],
+                "n_actors": 0, "n_repos": 0, "next_refresh": None}
+    if data is None:
+        return {"ok": False, "warming": fetching, "org": CFG.github_org, "error": err,
+                "actors": [], "repos": [], "n_actors": 0, "n_repos": 0, "next_refresh": None}
+    age = int(time.monotonic() - at)
+    out = dict(data)
+    out["age"] = age
+    out["next_refresh"] = max(0, CFG.actors_refresh - age)
+    out["stale_error"] = err
+    return out
 
 
 # --------------------------------------------------------------------------- graph
@@ -311,6 +473,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <div class="tab on" data-t="nodes" onclick="sw('nodes')">Nodes</div>
  <div class="tab" data-t="graph" onclick="sw('graph')">🧠 Knowledge graph</div>
  <div class="tab" data-t="molgang" onclick="sw('molgang')">🧪 MOLGANG</div>
+ <div class="tab" data-t="actors" onclick="sw('actors')">👥 Actors</div>
 </div>
 <div id="pane-nodes" class="pane on"><div class="grid" id="nodes"></div></div>
 <div id="pane-graph" class="pane"><div class="card"><h2 style="margin:0">🧠 Knowledge graph <span class="muted" id="kgstat"></span></h2>
@@ -318,6 +481,10 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <span class="lg"><span class="sw" style="background:#a98bff"></span>knowledge (MOLGANG fabric)</span></p>
  <svg id="kg" viewBox="0 0 1000 460" preserveAspectRatio="xMidYMid meet"></svg></div></div>
 <div id="pane-molgang" class="pane"><div class="grid" id="mol"></div></div>
+<div id="pane-actors" class="pane"><div class="card" style="flex:1 1 100%">
+ <h2 style="margin:0">👥 Actors <span class="muted" id="actstat"></span></h2>
+ <p class="muted" id="actmeta" style="margin:4px 0">every GitHub account active across the org's repositories · auto-refresh every 10 min</p>
+ <div id="actors"></div></div></div>
 <script>
 const NS="http://www.w3.org/2000/svg",$=id=>document.getElementById(id);
 const fmt=n=>(n||0).toLocaleString(),esc=s=>(s==null?'':String(s)).replace(/</g,'&lt;');
@@ -358,9 +525,29 @@ async function tickMol(){const m=await jget('/api/molgang');if(!m)return;const b
    (tb.seated||[]).forEach(p=>{h+=`<span class="chip">${esc(p.name)} <span class="muted">L${p.level} · ${p.woven}🧬</span></span>`;});h+='</div>';
    (tb.fabric||[]).forEach(f=>{h+=`<div class="row"><span>🧵 ${esc(f.term)}</span><span class="muted">${f.confirmations}✓</span></div>`;});h+='</div>';});
   return `<div class="card" style="flex:1 1 100%">${h}</div>`;}).join('');}
-function all(){tickNodes();tickGraph();tickMol();}
+async function tickActors(){const d=await jget('/api/actors');if(!d)return;const box=$('actors');
+ if(d.disabled){$('actstat').textContent='';box.innerHTML='<p class="muted">Actors tab disabled (no org configured). Pass <code>--github-org knitweb</code>.</p>';return;}
+ if(!d.actors||!d.actors.length){
+  if(d.warming){box.innerHTML='<p class="muted">loading actors from GitHub…</p>';return;}
+  box.innerHTML='<p class="neg">could not reach GitHub'+(d.error?(' ('+esc(d.error)+')'):'')+'. Works unauthenticated at 60 req/hr — set <code>GITHUB_TOKEN</code> for more.</p>';return;}
+ $('actstat').textContent=`— ${d.n_actors} actors (${d.humans||0} human · ${d.bots||0} bot) across ${d.n_repos} repos`;
+ const nr=d.next_refresh, refr=(nr!=null)?`next refresh in ${Math.floor(nr/60)}m${String(nr%60).padStart(2,'0')}s`:'';
+ $('actmeta').innerHTML=`every GitHub account active across <b>github.com/${esc(d.org)}</b>'s ${d.n_repos} repos · auto-refresh every 10 min · ${d.cached===false||d.age===0?'just refreshed':'updated '+d.age+'s ago'}${refr?' · '+refr:''}`
+  +(d.stale_error?` · <span class="neg">stale: ${esc(d.stale_error)}</span>`:'')+(d.rate_note?` · <span class="muted">partial (${esc(d.rate_note)}) — set GITHUB_TOKEN</span>`:'');
+ box.innerHTML=d.actors.map(a=>{const human=a.kind==='human';
+  const badge=human?'<span class="badge" style="background:#15402a;color:#39d98a">human</span>':'<span class="badge" style="background:#2a2440;color:#a98bff">bot</span>';
+  const repos=a.repos.map(r=>`<span class="chip">${esc(r)}</span>`).join('');
+  const m=[];
+  if(a.commits)m.push(`${fmt(a.commits)} commit${a.commits===1?'':'s'}`);
+  if(a.prs)m.push(`${a.prs} PR${a.prs===1?'':'s'}${a.merged_prs?` (${a.merged_prs}✓)`:''}`);
+  if(a.comments)m.push(`${fmt(a.comments)} comment${a.comments===1?'':'s'}`);
+  m.push(`${a.n_repos} repo${a.n_repos===1?'':'s'}`);
+  return `<div class="row" style="border-top:1px solid #20283c;padding-top:6px"><span><b>${esc(a.login)}</b> ${badge}</span>`
+   +`<span class="muted">${m.join(' · ')}</span></div>`
+   +`<div style="margin:2px 0 6px">${repos}</div>`;}).join('');}
+function all(){tickNodes();tickGraph();tickMol();tickActors();}
 jget('/api/health').then(h=>{if(h)$('ver').textContent='v'+h.version});
-sw('nodes');all();setInterval(tickNodes,2000);setInterval(tickMol,3000);setInterval(tickGraph,20000);
+sw('nodes');all();setInterval(tickNodes,2000);setInterval(tickMol,3000);setInterval(tickGraph,20000);setInterval(tickActors,60000);
 </script></body></html>"""
 
 
@@ -384,6 +571,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(json.dumps(build_graph()).encode(), "application/json")
             elif self.path.startswith("/api/molgang"):
                 self._send(json.dumps(read_molgang()).encode(), "application/json")
+            elif self.path.startswith("/api/actors"):
+                self._send(json.dumps(read_actors()).encode(), "application/json")
             elif self.path.startswith("/api/health"):
                 self._send(json.dumps({"ok": True, "version": __version__,
                                        "networkx": _nx is not None}).encode(), "application/json")
@@ -417,6 +606,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="a MOLGANG session base URL, e.g. http://localhost:8765 (repeatable)")
     ap.add_argument("--knitweb-src", default=os.environ.get("KNITWEB_SRC"),
                     help="path to a knitweb 'src' checkout, if knitweb isn't installed")
+    ap.add_argument("--github-org", default=os.environ.get("KNITWEB_MONITOR_ORG", "knitweb"),
+                    help="GitHub org/user for the Actors tab (default: knitweb; empty string disables)")
     ap.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     ap.add_argument("--version", action="version", version=f"knitweb-monitor {__version__}")
     args = ap.parse_args(argv)
@@ -424,12 +615,21 @@ def main(argv: list[str] | None = None) -> int:
     CFG.host, CFG.port, CFG.knitweb_src = args.host, args.port, args.knitweb_src
     CFG.nodes = [_parse_node(s) for s in args.node]
     CFG.molgang = list(args.molgang) or [u for u in (os.environ.get("KNITWEB_MONITOR_MOLGANG", "").split(",")) if u]
+    CFG.github_org = (args.github_org or "").strip()
+    CFG.github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+    # Background actor-roster refresher (the Actors tab) — every CFG.actors_refresh
+    # seconds, off the request path. Skipped entirely if no org is configured.
+    if CFG.github_org:
+        threading.Thread(target=_actors_loop, daemon=True).start()
 
     srv = ThreadingHTTPServer((CFG.host, CFG.port), Handler)
     url = f"http://{CFG.host}:{CFG.port}"
     print(f"knitweb-monitor {__version__} → {url}")
     print(f"  nodes: {len(CFG.nodes)} · molgang: {len(CFG.molgang)} · "
           f"networkx: {'yes' if _nx else 'no (builtin layout)'} · knitweb: {'yes' if _load_knitweb() else 'no'}")
+    print(f"  actors: {('github.com/' + CFG.github_org) if CFG.github_org else 'off'}"
+          f"{' (GITHUB_TOKEN set)' if CFG.github_token else ' (unauthenticated, 60 req/hr)'}")
     if args.open:
         try:
             webbrowser.open(url)
