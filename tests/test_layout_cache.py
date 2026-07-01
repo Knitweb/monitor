@@ -42,6 +42,30 @@ def test_empty_graph_is_handled():
     assert _layout([], []) == {}
 
 
+def test_layout_falls_back_when_optional_networkx_backend_fails(monkeypatch):
+    import knitweb_monitor as km
+
+    class BrokenGraph:
+        def add_nodes_from(self, nodes):
+            pass
+
+        def add_edges_from(self, edges):
+            pass
+
+    class BrokenNetworkx:
+        DiGraph = BrokenGraph
+
+        @staticmethod
+        def spring_layout(*args, **kwargs):
+            raise ModuleNotFoundError("No module named 'numpy'")
+
+    monkeypatch.setattr(km, "_nx", BrokenNetworkx)
+
+    layout = km._layout_compute(["a", "b"], [("a", "b")])
+
+    assert set(layout) == {"a", "b"}
+
+
 def test_cache_is_bounded_and_does_not_grow_unbounded():
     from knitweb_monitor import _layout, _layout_cache, _LAYOUT_CACHE_MAX
     _layout_cache.clear()
