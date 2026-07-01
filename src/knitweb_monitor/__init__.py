@@ -361,11 +361,20 @@ def _layout_compute(nodes: list[str], edges: list[tuple[str, str]]) -> dict:
     if not nodes:
         return {}
     if _nx is not None:
-        g = _nx.DiGraph()
-        g.add_nodes_from(nodes)
-        g.add_edges_from(edges)
-        pos = _nx.spring_layout(g, seed=7, iterations=80, k=1.1)
-        return {n: (round(float(p[0]), 4), round(float(p[1]), 4)) for n, p in pos.items()}
+        try:
+            g = _nx.DiGraph()
+            g.add_nodes_from(nodes)
+            g.add_edges_from(edges)
+            pos = _nx.spring_layout(g, seed=7, iterations=80, k=1.1)
+            return {n: (round(float(p[0]), 4), round(float(p[1]), 4)) for n, p in pos.items()}
+        except Exception:
+            # networkx is optional and may be present without its numeric backend.
+            pass
+    return _layout_compute_pure(nodes, edges)
+
+
+def _layout_compute_pure(nodes: list[str], edges: list[tuple[str, str]]) -> dict:
+    """Pure-Python deterministic force-directed layout."""
     # --- pure-Python fallback: deterministic force-directed layout ---
     import math
     import random
